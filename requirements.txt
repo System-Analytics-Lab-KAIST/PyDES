@@ -1,0 +1,23 @@
+# Runtime dependencies for PyDES.
+#
+#   python -m pip install -r requirements.txt
+#
+# Lower bounds only. PyDES does not pin exact versions, so it can be used
+# alongside other packages in an existing analysis environment.
+
+# Core numerics and statistics
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+matplotlib>=3.7
+
+# Excel export from TableStat and JobLogTable
+openpyxl>=3.1
+
+# ZeroMQ link between a running simulation and the monitor
+pyzmq>=25.0
+
+# Qt bindings. Required by ConnectMQ (QThread) and therefore by the simulation
+# engine itself; the graphical monitor (SimMonMainUI, SimMonObj) additionally
+# needs a display.
+PyQt5>=5.15

@@ -1,0 +1,182 @@
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---------------------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.conda/
+conda-meta/
+
+# ---------------------------------------------------------------------------
+# Environment and secrets
+#
+# PYTHONPATH for PyDES is set in a local .env file (see the Install section of
+# the README), so .env is intentionally never committed.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+credentials.json
+
+# ---------------------------------------------------------------------------
+# Testing, coverage, type checking, linting caches
+# ---------------------------------------------------------------------------
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+nosetests.xml
+.cache
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# Notebooks
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# ---------------------------------------------------------------------------
+# Editors and IDEs
+# ---------------------------------------------------------------------------
+.idea/
+*.iml
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.spyderproject
+.spyproject
+.ropeproject
+
+# ---------------------------------------------------------------------------
+# Operating system
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---------------------------------------------------------------------------
+# Agentic AI coding assistants
+#
+# Assistant state, caches, transcripts and local rule overrides are personal to
+# a contributor's machine and must not end up in the repository. Shared,
+# reviewed guidance files (for example a committed AGENTS.md) are re-included
+# explicitly below.
+# ---------------------------------------------------------------------------
+
+# Claude / Claude Code
+.claude/
+.claude.json
+.claude.json.backup
+CLAUDE.local.md
+.anthropic/
+.mcp.json
+
+# Cursor
+.cursor/
+.cursorrules
+.cursorignore
+.cursorindexingignore
+
+# GitHub Copilot / Copilot Workspace
+.copilot/
+.github/copilot-instructions.local.md
+
+# Aider
+.aider*
+!.aider.conf.yml.example
+
+# Continue, Cline, Roo, Kilo, Windsurf, Zed, Codeium and friends
+.continue/
+.cline/
+.clinerules
+.clinerules/
+.roo/
+.roomodes
+.kilocode/
+.windsurf/
+.windsurfrules
+.codeium/
+.zed/
+
+# OpenAI Codex / Codex CLI, Google Gemini CLI, Amazon Q, Sourcegraph Cody
+.codex/
+.gemini/
+.amazonq/
+.sourcegraph/
+.cody/
+
+# Generic assistant scratch space, transcripts and generated plans
+.ai/
+.agent/
+.agents/
+ai-scratch/
+*.aiprompt
+*.llm.log
+agent-transcripts/
+
+# Shared instruction files are tracked on purpose; ignore only local overrides
+AGENTS.local.md
+GEMINI.local.md
+.github/instructions.local.md
+
+# ---------------------------------------------------------------------------
+# Simulation and analysis output
+# ---------------------------------------------------------------------------
+*.xlsx
+!docs/**/*.xlsx
+Stat.xlsx
+*.log
+*.pkl
+*.pickle
+simlog/
+output/
+results/
