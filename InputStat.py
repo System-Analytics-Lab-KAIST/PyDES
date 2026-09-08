@@ -177,7 +177,7 @@ class RndNumGen:
         # var = mean*theta_scale
         return self.stream.gamma(k_shape, theta_scale, size=size)
 
-    def get_gamma_stored(self, size=1):
+    def get_gamma_stored(self, size=None):
         return self.stream.gamma(self.k_shape, self.theta_scale, size=size)
 
     def get_exp_gamma(self, alpha, exp_mean, k_shape, theta_scale, size=None):

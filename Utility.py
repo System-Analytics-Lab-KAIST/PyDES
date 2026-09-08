@@ -27,40 +27,43 @@ class MState(HashableEnum):
     IDLE = enum.auto()
     WORK = enum.auto()
     SETUP = enum.auto()
-    CM = enum.auto()
-    PM = enum.auto()
+    CM = enum.auto()  # corrective maintenance = repair
+    PM = enum.auto()  # preventive maintenance
 
 
-
-class MyQueue(list):
-    def __init__(self, name, selector=None, emq=None, log=None, widget=None):
+class PyDES_Queue(list):
+    def __init__(self, name, emq=None, selector=None, log=True, widget=None):
+        # super().__init__()
         self.name = name
         if selector is None:
             selector = self.fifo_selector
         self.selector = selector
         self.emq = emq
-        self.log = log
-        if log is not None:
+        if log != False:
             TableStat.register("Queue", self)
+            if isinstance(log, TimeAverage): 
+                self.log = log
+            else:  # create
+                self.log = TimeAverage(name=name)
         self.widget = widget
 
-    def get_stat_series(self, newT):
-        return self.log.get_stat_series(newT, self.name)
+    def get_stat_series(self):
+        return self.log.get_stat_series(name=self.name)
 
-    def reset_stat(self, t):
-        self.log.reset(t)
+    def reset_stat(self):
+        self.log.reset()
 
     def qsize(self):
         return len(self)
 
     def mon_log(self):
-        if self.emq:
+        if self.emq is not None:
             s = self.qsize()
             self.emq.sendMonMsg(f"queue {self.name} {s}")
-            if self.log:
-                self.log.stateChange(self.emq.Tnow, s)
-                qa = self.log.timeAvg(self.emq.Tnow)
+            if self.log is not None:
+                self.log.stateChange(s)
                 if self.widget:
+                    qa = self.log.timeAvg()
                     self.emq.sendMonMsg(f"widget {self.widget} value {qa:.3f}")
 
     def enqueue(self, e):
@@ -85,8 +88,7 @@ class MyQueue(list):
         return 0
 
 
-
-class MyPQ:
+class PyDES_PQ:
     def __init__(self):
         self.heap = []
 
@@ -129,21 +131,97 @@ class MyPQ:
         heapq.heapify(self.heap)
 
 
+class PyDES_PQwLog(PyDES_PQ):
+    def __init__(self, name, emq=None, log=True):
+        super().__init__()
+        self.name = name
+        self.emq = emq
+        if log != False:
+            TableStat.register("PQ", self)
+            if isinstance(log, TimeAverage):
+                self.log = log
+            else:  
+                self.log = TimeAverage(name=name)
+
+    def get_stat_series(self):
+        return self.log.get_stat_series(name=self.name)
+
+    def reset_stat(self):
+        self.log.reset()
+
+    def put(self, obj):
+        heapq.heappush(self.heap, obj)
+        self.log.stateChange(len(self))
+
+    def get(self):
+        e = heapq.heappop(self.heap)
+        self.log.stateChange(len(self))
+        return e
+
+
+class PyDES_MultiQueue_Abstract(dict):
+    def __init__(self, name, emq):
+        super().__init__()
+        self.emq = emq
+        self.name = name
+
+    def make_queue(self, key):
+        pass
+    
+    def __missing__(self, key):  # self[key]가 없을 경우, item 생성
+        value = self[key] = self.make_queue(key)
+        return value
+
+    def qsize(self):
+        s = 0
+        for q in self.values():
+            s += q.qsize()
+        return s
+
+
+class PyDES_MultiQueue(PyDES_MultiQueue_Abstract):
+    def __init__(self, name, emq, selector=None):
+        super().__init__(name, emq)
+        self.selector = selector
+
+    def make_queue(self, key):
+        return PyDES_Queue(f"{self.name}_{key}", self.emq, self.selector, log=True)
+
+
+class PyDES_MultiPQ(PyDES_MultiQueue_Abstract):
+    def make_queue(self, key):
+        return PyDES_PQwLog(f"{self.name}_{key}", self.emq, log=True)
+
+
 class BatchMean(list):
-    bm_list = []
+    @classmethod
+    def init_list(cls):
+        cls.bm_list = []
 
     @classmethod
     def register(cls, obj):
+        if "bm_list" not in dir(cls):
+            cls.init_list()
         # list.append(cls.bm_list, obj)
         cls.bm_list.append(obj)
 
     @classmethod
-    def save_batch_all(cls, t=None):
+    def save_batch_all(cls):
         for bm in cls.bm_list:
-            bm.save_batch(t)
+            bm.save_batch()
 
-    def __init__(self):
+    @classmethod
+    def get_batch_df(cls, fn=None):
+        L = {bm.name: bm for bm in cls.bm_list}
+        df = pd.DataFrame(L)
+        if fn is not None:
+            with pd.ExcelWriter(fn, mode="w", engine='openpyxl') as writer:
+                df.to_excel(excel_writer=writer)
+        return df
+
+    def __init__(self, name=""):
         super().__init__()
+        self.name = name
         BatchMean.register(self)
 
     def batch_len(self): return len(self)
@@ -156,21 +234,21 @@ class BatchMean(list):
 
     def __str__(self):
         avg, serr, n = self.report(s=1)
-        return f"{avg:.3f} (+/- {serr:.3f}, n={n})"
+        return f"{self.name} {avg:.3f} (+/- {serr:.3f}, n={n})"
 
-    def get_batch_mean(self, t=None):  return None  # to be implemented in subclass
+    def get_batch_mean(self):  return None  # to be implemented in subclass
 
-    # assumes: get_batch_mean(t) is defined
-    def save_batch(self, t=None):
-        m = self.get_batch_mean(t)
+    # assumes: get_batch_mean() is defined
+    def save_batch(self):
+        m = self.get_batch_mean()
         if m is not None:
             list.append(self,m)
 
 
 from collections import defaultdict
 class SingleCounter(BatchMean):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name=""):
+        super().__init__(name)
         self.value = 0
 
     def set(self, n):
@@ -186,7 +264,7 @@ class SingleCounter(BatchMean):
     def __repr__(self):
         return f"Counter({self.value})"
 
-    def get_batch_mean(self, t):  
+    def get_batch_mean(self):  
         m = self.value
         self.value = 0
         return m
@@ -197,7 +275,7 @@ class MultiCounter(defaultdict):
         super().__init__(int)
         self.batch_mean = defaultdict(BatchMean)
 
-    def saveBatch(self, t=None):
+    def save_batch(self):
         for key in self.keys():         
             self.batch_mean[key].append(self[key])
             self[key] = 0
@@ -207,15 +285,16 @@ class MultiCounter(defaultdict):
 
 
 class Accumulator(BatchMean):
-    def __init__(self, history=False):
-        super().__init__()
+    def __init__(self, name="", history=False):
+        super().__init__(name)
         self.resetHistory(history)
         self.reset()
 
-    def reset_stat(self, t=None):
+    def reset_stat(self):
         self.reset()
 
-    def get_stat_series(self, t, name=None):
+    def get_stat_series(self, name=None):
+        if name is None: name = self.name
         data = [self.n, self.avg(), self.std(), self.min, self.max]
         return pd.Series(data, index=["n", "avg", "std", "min", "max"], name=name)
 
@@ -258,30 +337,35 @@ class Accumulator(BatchMean):
         if self.batch_len() <= 1:
             avg, serr, n = self.avg(), self.std(), self.n
             serr /= np.sqrt(n)
-            return f"{avg:.3f} (+/- {serr:.3f}, n={n})"
+            return f"{self.name} {avg:.3f} (+/- {serr:.3f}, n={n})"
         else:
             return BatchMean.__str__(self)
 
     def sum(self):
         return self.X
 
-    def get_batch_mean(self, t):  
+    def get_batch_mean(self):  
         m = self.avg()
         self.reset()
         return m
 
-    
+def get_sim_clock(clock=None):
+    if clock is None:
+        from DES import EvtMsgQueue
+        clock = EvtMsgQueue.sim_clock
+    return clock
 
 class TimeAverage(BatchMean):
-    def __init__(self, t=0, v=0, history=False): # history가 true면 적분 그래프 표시
-        super().__init__()
-        self.reset(t, v)
-        self.resetHistory(history, t, v)
+    def __init__(self, name="", clock=None, v=0, history=False): # history가 true면 적분 그래프 표시
+        super().__init__(name)
+        self.clock = get_sim_clock(clock)
+        self.reset(v)
+        self.resetHistory(history, v)
         self.drawChart = self.plotHistory  # old name
 
     def get_result(self):
         if self.batch_len() <= 1:
-            avg = self.timeAvg(self.prevT)
+            avg = self.timeAvg()
             serr, n = 0, 1
         else:
             avg, serr, n = self.report(s=1)
@@ -290,12 +374,13 @@ class TimeAverage(BatchMean):
 
     def __str__(self):
         avg, serr, n = self.get_result()
-        s = f"{avg:.3f}"
+        s = f"{self.name} {avg:.3f}"
         if n > 1:
             s += f" (+/- {serr:.3f}, n={n})"
         return s
 
-    def reset(self, t, v=None):
+    def reset(self, v=None):
+        t = self.clock()
         self.initT = t
         self.prevT = t
         if v is not None:
@@ -305,28 +390,26 @@ class TimeAverage(BatchMean):
         self.min = infinity
         self.max = -infinity
 
-    def get_batch_mean(self, t):  
-        m = self.timeAvg(t)
-        self.reset(t)
+    def get_batch_mean(self):
+        m = self.timeAvg()
+        self.reset()
         return m
 
-    def timeSinceReset(self, t):
-        return t - self.initT
-
-    def get_stat_series(self, t, name=None):
-        data = [self.timeAvg(t), self.min, self.max]
+    def get_stat_series(self, name=None):
+        if name is None: name = self.name        
+        data = [self.timeAvg(), self.min, self.max]
         return pd.Series(data, index=["avg", "min", "max"], name=name)
 
-    def resetHistory(self, history, t=0, v=0):
+    def resetHistory(self, history, v=0):
         self.history = history
         if self.history:
-            self.histT = [t]
+            self.histT = [self.clock()]
             self.histV = [v]
 
-    def timeAvg(self, T, std=False):
-        dT = T - self.initT
+    def timeAvg(self, std=False):
+        dT = self.clock() - self.initT
         if dT <= 0.0:  return 0, 0 if std else 0
-        self.stateChange(T, self.prevV)  # maintain current state
+        self.stateChange(self.prevV)  # maintain current state
         avg = self.sum / dT
         if std:
             var = self.XX/dT - avg*avg
@@ -340,7 +423,8 @@ class TimeAverage(BatchMean):
             return avg
 
 
-    def stateChange(self, t, v):
+    def stateChange(self, v):
+        t = self.clock()
         if self.history:
             if t == self.prevT:
                 self.histV[-1] = v
@@ -358,11 +442,11 @@ class TimeAverage(BatchMean):
         self.prevT = t
         self.prevV = v
 
-    def stateInc(self, t, dv=1):
-        self.stateChange(t, self.prevV+dv)
+    def stateInc(self, dv=1):
+        self.stateChange(self.prevV+dv)
 
-    def plotHistory(self, ax=None, label=None, t=None):
-        if t: self.stateInc(t,0)
+    def plotHistory(self, ax=None, label=None):
+        self.stateInc(0)
         if not self.history: return
         if ax is None:
             fig, ax = plt.subplots() # (figsize=(13,7))
@@ -371,14 +455,18 @@ class TimeAverage(BatchMean):
 
 
 class TableStat:
-    book = {}
+    @classmethod
+    def init_book(cls):
+        cls.book = {}
 
     # this is assumed to have the following methods
-    # - get_stat_series(t): returns a pd.Series
-    # - reset_stat(t) : resets stat of this
+    # - get_stat_series(): returns a pd.Series
+    # - reset_stat() : resets stat of this
 
     @classmethod
     def register(cls, table_name, this):
+        if "book" not in dir(cls):
+            cls.init_book()
         try:
             cls.book[table_name].append(this)
         except KeyError:
@@ -391,12 +479,12 @@ class TableStat:
                 this.reset_stat(t)
 
     @classmethod
-    def to_excel_sheet(cls, table_name, writer, T):
+    def to_excel_sheet(cls, table_name, writer):
         L = cls.book[table_name]
         if len(L) == 2 and isinstance(L[1], pd.DataFrame):
             df = L[1]
         else:
-            L_stat = [ent.get_stat_series(T) for ent in L]
+            L_stat = [ent.get_stat_series() for ent in L]
             if isinstance(L_stat[0], pd.DataFrame):
                 df = pd.concat(L_stat, axis=0)
             else:
@@ -408,11 +496,11 @@ class TableStat:
 
 
     @classmethod
-    def to_excel_all(cls, fn, T):
+    def to_excel_all(cls, fn):
         def write_excel(fn):
             with pd.ExcelWriter(fn, mode="w", engine='openpyxl') as writer:
                 for table_name in cls.book.keys():
-                    df = cls.to_excel_sheet(table_name, writer, T)
+                    df = cls.to_excel_sheet(table_name, writer)
                     df_list.append(df)
 
         df_list = []
@@ -420,8 +508,9 @@ class TableStat:
             write_excel(fn)
         except Exception as e:
             print (e)
-            print (f"{fn} is already open.  output to 'Stat.xlsx' instead ")
-            write_excel("Stat.xlsx")
+            fn2 = fn[:-5]+"(2).xlsx"
+            print (f"{fn} is already open.  output to {fn2} instead ")
+            write_excel(fn2)
         return df_list
     
     @classmethod
@@ -429,41 +518,45 @@ class TableStat:
     def append_and_reset(cls, table_name, T):
         L = cls.book[table_name]
         ent = L[0]
-        S = ent.get_stat_series(T)
+        S = ent.get_stat_series()
         S_df = pd.DataFrame(data=[S], index=[S.name], columns=S.index)
-        S_df["@Time"] = T
+        S_df["@Time"] = T  # save the time of record
         if len(L) == 1:  # df is not made yet
             L.append(S_df)
         else:  # df already exists
             df = L[1]
             L[1] = pd.concat([df, S_df])
-        ent.reset_stat(T)
+        ent.reset_stat()
 
 
 
 class StateTime:
-    def __init__(self, table_name, row_name, states, t=0, init_state=-1):
+    def __init__(self, table_name, row_name, states, clock=None, init_state=-1):
         self.S = pd.Series(index=states, name=row_name)
         self.prevS = states[init_state]
-        self.reset_stat(t)
+        self.clock = get_sim_clock(clock)
+        self.reset_stat()
         TableStat.register(table_name, self)
 
-    def reset_stat(self, t):
+    def reset_stat(self):
+        t = self.clock()
         self.S[:] = 0.0
         self.initT = t
         self.prevT = t
 
-    def get_stat_series(self, newT):
-        self.setState(self.prevS, newT)
+    def get_stat_series(self):
+        self.setState(self.prevS)
         return self.S
 
-    def time_percentage(self, newT):
-        self.setState(self.prevS, newT)
+    def time_percentage(self):
+        newT = self.clock()
+        self.setState(self.prevS)
         if newT <= self.initT:
             return self.S
         return self.S / (newT - self.initT) * 100
 
-    def setState(self, newS, newT):
+    def setState(self, newS):
+        newT = self.clock()
         dt = newT - self.prevT
         self.S[self.prevS] += dt
         self.prevT = newT
@@ -482,9 +575,23 @@ class JobLogTable:
         if self.record:
             self.S.loc[jobid, attribute] = value
 
-    def to_excel(self, writer, sheet=None):
-        # self.S.to_excel(writer, sheet_name=sheet)
-        self.S.to_excel(excel_writer=writer)
+    def getAttribute(self, jobid, attribute):
+        return self.S.loc[jobid, attribute]
+
+    def to_excel(self, writer, sheet="Sheet1"):
+        self.S.to_excel(excel_writer=writer, sheet_name=sheet)
+ 
+
+class PyDES_DefaultDict(dict):
+    def __init__(self, value_cls):
+        super().__init__()
+        self.value_cls = value_cls  # value에 사용할 class명 
+
+    def __missing__(self, key): 
+        # self[key]가 없을 경우, value 생성
+        # key를 인자로 사용할 수 있음
+        value = self[key] = self.value_cls()
+        return value
 
 
 def rotate(dx, dy, x, y, ox=0, oy=0):
@@ -675,3 +782,9 @@ def circular_position(nx, ny, ccw, dx, dy, xp, yp, k):
             xk += dx
 
     return xk, yk
+
+
+def init_stat_class_variables():
+    BatchMean.init_list()
+    TableStat.init_book()
+    

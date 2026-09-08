@@ -30,13 +30,16 @@ class EvtMsg:
     def copy(self):  # e.canceled = False
         return EvtMsg(self.time, self.fm, self.to, self.msg, self.param)
 
-# class MyPQ has
+# class PyDES_PQ has
 # put(e) : enqueue
 # get(e) : dequeue
 # qsize() : # of items in queue
 # empty() : check if empty
 
-class EvtMsgQueue(MyPQ):  #(PriorityQueue):
+class EvtMsgQueue(PyDES_PQ):  #(PriorityQueue):
+    last_emq = None
+    sim_clock = None
+
     def __init__(self, name, time_scale=0):
         super().__init__()
         self.name = name
@@ -51,10 +54,19 @@ class EvtMsgQueue(MyPQ):  #(PriorityQueue):
         self.simZMQ = None
         self.monLog = None
         self.clockName = "simClock"
+        EvtMsgQueue.last_emq = self
+        EvtMsgQueue.sim_clock = self.clock
         self.paused_evt = []
+        init_stat_class_variables() # initialize stat class variables
+
+    def clock(self):  return self.Tnow
 
     def scheduleEvtMsg4(self, dtime, fm, to, msg, param=None):
         e = EvtMsg(self.Tnow + dtime, fm, to, msg, param)
+        self.put(e) # self.scheduleEvtMsg(e)
+
+    def scheduleAgain(self, dtime, e):
+        e = EvtMsg(self.Tnow + dtime, e.fm, e.to, e.msg, e.param)
         self.put(e) # self.scheduleEvtMsg(e)
 
     def findEvtMsg(self, to=None, msg=None, elist=None, param=None):
@@ -320,8 +332,12 @@ class EModel:
         to.processEvtMsg(e) 
 
     def scheduleEvtMsg4(self, dtime, fm, to, msg, param=None):
-        self.emq.scheduleEvtMsg4(dtime, fm, to, msg, param)
-        # same as self.emq.put(EvtMsg(dtime, fm, to, msg, param))
+        self.emq.put(EvtMsg(self.emq.Tnow + dtime, fm, to, msg, param))
+        # same as self.emq.scheduleEvtMsg4(dtime, fm, to, msg, param)
+
+    def scheduleAgain(self, dtime, e):
+        # same as self.emq.scheduleAgain(dtime, e)
+        self.emq.put(EvtMsg(self.emq.Tnow + dtime, e.fm, e.to, e.msg, e.param))
 
     def processEvtMsg(self, e):
         # if e.msg != "EM_resume": print (e.time, e.msg)
@@ -338,10 +354,10 @@ class EModel:
         return True
 
     def EM_batch(self, e):
-        # print (f"batch saved @ {self.Tnow():.3f}")
-        BatchMean.save_batch_all(self.Tnow())
+        print (f"batch saved @ {self.Tnow():.3f}")
+        BatchMean.save_batch_all()
         batch_dT = e.param
-        self.scheduleEvtMsg4(batch_dT, self, self, "EM_batch", param=batch_dT)
+        self.scheduleAgain(batch_dT, e)
 
     def EM_stop(self, e):
         self.emq.cancelEvtMsgAll()
@@ -464,9 +480,6 @@ class PModel(EModel):
             self.resume_process(self._proc_instance_, e.param, check_evt=evt)
 
 
-AModel = EModel     # old name for EModel
-ACModel = PModel    # old name for PModel
-
 
 # a queue waiting for resource
 class ResourceQueue(list):
@@ -474,7 +487,7 @@ class ResourceQueue(list):
         self.id = id
         self.log_level = log_level  # 0 for no log, 1 for average only, 2 for detailed log
         if log_level > 0:
-            self.log = TimeAverage(t=emq.Tnow, v=0, history=log_level>1)
+            self.log = TimeAverage(name=id, v=0, history=log_level>1)
         self.emq = emq
 
     def Tnow(self):
@@ -486,14 +499,14 @@ class ResourceQueue(list):
     def enqueue(self, job):
         self.append(job)
         if self.log_level > 0:
-            self.log.stateInc(self.Tnow(), 1)
+            self.log.stateInc(1)
 
 
     def dequeue(self, i=0):
         if len(self) > 0:
             job = self.pop(i)
             if self.log_level > 0:
-                self.log.stateInc(self.Tnow(), -1)
+                self.log.stateInc(-1)
             return job
         else:
             return None
@@ -521,7 +534,7 @@ class Resource:  # resource with capacity
         if RQ is not None:
             self.queue = RQ(id, log_level, emq)  # queue of entities waiting for this resource
         if self.log_level > 0:
-            self.log = TimeAverage(t=0, v=self.capa, history=log_level>1)
+            self.log = TimeAverage(name=id, v=self.capa, history=log_level>1)
 
     def init_state(self, state_var_name="state", s=None):
         self.__dict__[state_var_name] = s
@@ -538,7 +551,7 @@ class Resource:  # resource with capacity
 
     def update_log(self):
         if self.log_level > 0:
-            self.log.stateChange(self.Tnow(), self.available())
+            self.log.stateChange(self.available())
 
     def is_seized_by(self, job):
         return job in self.seized_by
@@ -698,6 +711,15 @@ class JobSource(PModel):
 
     def get_count(self):
         return self.count
+
+
+# alias (ond names)
+MyQueue = PyDES_Queue
+MyPQ = PyDES_PQ
+AModel = EModel     # old name for EModel
+ACModel = PModel    # old name for PModel
+
+
 
 # # pickle serialization test for circular reference
 # class A:
