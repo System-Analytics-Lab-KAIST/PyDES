@@ -3,13 +3,204 @@ import time
 from ConnectMQ import *
 import math
 from Utility import *
+from InputStat import RndNumGen
 import pickle
 import sys
 import inspect
 from itertools import count
+from SimMonMainUI import run_monitor
+import random
+import torch
+import numpy as np
 
+import multiprocessing as mp
+# import torch.multiprocessing as mp
+# from concurrent.futures import ProcessPoolExecutor
 
 # single federation version for simplicity
+class Environment:
+    current_env = None
+
+    def __init__(self, name, emq=None):
+        if emq is None:
+            emq = EvtMsgQueue(name)
+        Environment.current_env = self
+        self.emq = emq
+        emq.env = self
+
+        self.name = name
+        self.config = None  # experimental condifuration dict
+        self.main_model = None
+        self.p_models = []
+        self.bm_list = []  # BatchMean instances
+        self.table_stat = TableStat()
+        self.job_log = JobLogTable(record=True)
+        self.result = None
+
+    def clock(self):  return self.emq.Tnow
+    def save_result(self, res): self.result = res
+
+    def config_item(self, key):
+        return self.config[key] if self.config is not None else None
+
+    def record_job_log(self, id, s, v):
+        self.job_log.setAttribute(id, s, v)
+
+    def get_job_log(self, id, a):
+        return self.job_log.getAttribute(id, a)  
+
+    def clear_stat(self):
+        self.table_stat.reset_all()
+        self.job_log.S = pd.DataFrame(columns=self.job_log.S.columns)
+        for bm in self.bm_list:
+            bm.clear()       
+
+    def initial_events(self, main_model, stop_T=None, batch_dT=None):
+        self.main_model = main_model
+        if stop_T is not None:
+            self.emq.cancelEvtMsgAll(main_model, "EM_stop")
+            self.emq.scheduleEvtMsg4(stop_T, main_model, main_model, "EM_stop", param=True)
+        if batch_dT is not None and batch_dT > 0:
+            self.emq.cancelEvtMsgAll(main_model, "EM_batch")
+            self.emq.scheduleEvtMsg4(batch_dT, main_model, main_model, "EM_batch", param=batch_dT)
+
+    def run_simulation(self): 
+        self.emq.runSimulation()
+        return self.result
+
+    def runSimulation(self): return self.run_simulation() # alias
+
+    def register_pmodel(self, pmodel):  self.p_models.append(pmodel)
+
+    def init_pmodel_process(self):
+        for m in self.p_models:
+            if m.need_to_start_proc:
+                m.init_process()
+
+    def register_bm(self, obj):  self.bm_list.append(obj)
+
+    def save_batch_all(self):
+        for bm in self.bm_list:
+            bm.save_batch()
+
+    def get_batch_df(self, fn=None):
+        L = {bm.name: bm for bm in self.bm_list}
+        df = pd.DataFrame(L)
+        if fn is not None:
+            with pd.ExcelWriter(fn, mode="w", engine='openpyxl') as writer:
+                df.to_excel(excel_writer=writer)
+        return df
+
+    @staticmethod
+    def set_seed(seed=42, all=False):
+        if seed is None: return
+        RndNumGen.init_rnd_generators(seed)
+        # RndNumGen.set_master_seed(seed)  # PyDES의 master seed 고정
+        if all:
+            random.seed(seed)    # Python 내장 random 모듈
+            np.random.seed(seed) # NumPy 모듈
+            torch.manual_seed(seed) # PyTorch CPU 연산
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed) # PyTorch GPU 연산 (단일 및 다중 GPU)
+            # # cuDNN 연산 결정론적 설정 (속도가 약간 감소할 수 있음)
+            # torch.backends.cudnn.deterministic = True
+            # torch.backends.cudnn.benchmark = False
+
+    def run_with_mon(self, scene_fn, main_fn=None, ui=None, conn=True, time_scale=1):
+        mon_proc = mp.Process(target=run_monitor, args=(ui, scene_fn, conn, self.config))
+        mon_proc.start()
+        self.emq.timeScale = time_scale
+        self.emq.makeZmq(mon=True, sync=True)
+        if main_fn is None:
+            self.run_simulation()
+        else:
+            main_fn()
+        mon_proc.join()
+
+    def run_simulation_single(self, pid):
+        torch.set_num_threads(1)
+        Environment.current_env = self
+        self.pid = pid
+        # self.set_seed(pid)
+        return self.run_simulation()
+
+    def run_simulation_parallel(self, n_instance, pool=None):
+        n_proc = min(n_instance, os.cpu_count())
+        if pool is None:
+            with mp.Pool(processes=n_proc) as p:
+                return p.map(self.run_simulation_single, range(n_instance))
+        else:
+            return pool.map(self.run_simulation_single, range(n_instance))
+
+
+    @staticmethod
+    def run_multiple(work_fn, param_list, parallel=True):
+        if parallel:
+            n_proc = min(len(param_list), os.cpu_count())
+            # Pool is an old style multi-processing
+            with mp.Pool(processes=n_proc) as pool:
+                res_list = pool.starmap(work_fn, param_list)
+            # ProcessPoolExecuter is a new style multi-processing
+            # with ProcessPoolExecutor(max_workers=n_proc) as executor:
+            #     futures = [executor.submit(work_fn, *p) for p in param_list]
+            #     res_list = [f.result() for f in futures]                
+        else:
+            res_list = []
+            for a in param_list:
+                r = work_fn(*a)
+                res_list.append(r)
+        return res_list
+
+    @staticmethod
+    def collect_res_df(res_list, param_list=None, cfg_name_idx=None, col_name=None):
+        res_dict = {}
+        for i, df in enumerate(res_list):
+            if cfg_name_idx is None:
+                key = df.attrs["name"] 
+            else: 
+                key = param_list[i][cfg_name_idx]
+            if col_name is None:
+                res_dict[key] = df
+            else:  # collect specified column only
+                res_dict[key] = df[col_name]
+        res_df = pd.DataFrame(res_dict)
+        return res_df
+
+    @staticmethod
+    def make_plot(df, style="box"):
+        if style == "box":
+            df.boxplot()
+        else:  # trend plot of mean
+            df_mean = df.mean(axis=0)  # or use df.median
+            plt.plot(df.columns, df_mean, color="blue", marker="o", label="Mean")
+            # low = df.quantile(0.25, axis=0)
+            # high = df.quantile(0.75, axis=0)
+            std = df.std(axis=0) / np.sqrt(len(df))
+            low = (df_mean - std).clip(lower=0)
+            high = df_mean + std
+            plt.fill_between(df.columns, low, high, color="blue", alpha=0.2, label="25th-75th Percentile")
+        plt.show()
+
+    @staticmethod
+    def run_multiple_and_plot(work_fn, param_list, cfg_name_idx=None, col_name=None, style="box", parallel=True):
+        res_list = Environment.run_multiple(work_fn, param_list, parallel)
+        res_df = Environment.collect_res_df(res_list, param_list, cfg_name_idx, col_name)
+        Environment.make_plot(res_df, style)
+        return res_df
+
+    def save_env(self, fn):
+        with open(fn, 'wb') as f:
+            pickle.dump(self, f)    
+
+
+    @staticmethod
+    def load_env(fn):
+        with open(fn, 'rb') as f:
+            env = pickle.load(f)
+            env.clear_stat()
+        return env
+
+
 
 class EvtMsg:
     def __init__(self, time, fm, to, msg, param=None):
@@ -37,9 +228,6 @@ class EvtMsg:
 # empty() : check if empty
 
 class EvtMsgQueue(PyDES_PQ):  #(PriorityQueue):
-    last_emq = None
-    sim_clock = None
-
     def __init__(self, name, time_scale=0):
         super().__init__()
         self.name = name
@@ -54,12 +242,15 @@ class EvtMsgQueue(PyDES_PQ):  #(PriorityQueue):
         self.simZMQ = None
         self.monLog = None
         self.clockName = "simClock"
-        EvtMsgQueue.last_emq = self
-        EvtMsgQueue.sim_clock = self.clock
         self.paused_evt = []
-        init_stat_class_variables() # initialize stat class variables
 
     def clock(self):  return self.Tnow
+
+    def reset_tnow(self, tnow_new=0.0):
+        delta = tnow_new - self.Tnow
+        self.Tnow = tnow_new
+        for e in self.heap:  # maybe not in time order
+            e.time += delta
 
     def scheduleEvtMsg4(self, dtime, fm, to, msg, param=None):
         e = EvtMsg(self.Tnow + dtime, fm, to, msg, param)
@@ -79,9 +270,10 @@ class EvtMsgQueue(PyDES_PQ):  #(PriorityQueue):
 
     def cancelEvtMsg(self, to=None, msg=None, param=None):
         e, _ = self.findEvtMsg(to, msg, param=param)
-        if e:
+        if e is not None:
             e.canceled = True
         return e
+    
     def cancelEvtMsgAll(self, to=None, msg=None, pause=False, param=None):
         for e in self.heap:  # maybe not in time order
             if self.match(e, to, msg, param):
@@ -178,11 +370,11 @@ class EvtMsgQueue(PyDES_PQ):  #(PriorityQueue):
         self.Tsince = self.Tnow
         self.timeSince = time.time()
 
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        del state["simZMQ"]
-        del state["monLog"]
-        return state
+    # def __getstate__(self):
+    #     state = self.__dict__.copy()
+    #     del state["simZMQ"]
+    #     del state["monLog"]
+    #     return state
 
     def ZMQ_unconnected(self):
         return self.simZMQ is None or (not self.simZMQ.connected)
@@ -258,19 +450,23 @@ class EvtMsgQueue(PyDES_PQ):  #(PriorityQueue):
             self.sendMonMsg(f"widget {self.clockName} text {self.Tnow:.3f}")
             self.checkMonMsg()
 
-    def runSimulation(self, t_end=None, main_model=None):
-        if t_end is not None and main_model is not None:
-            self.scheduleEvtMsg4(t_end, None, main_model, "EM_stop")
+    def stop_running(self):
+        self.keep_running = False
+
+    def runSimulation(self):
         numEvt = 0
-        while not self.empty():
+        # loop will stop if event handler sets self.keep_running = False
+        self.keep_running = True 
+        while self.keep_running and (not self.empty()):
             self.runNextEvent()
             numEvt += 1
             # if numEvt % 10000 == 0:
             #     print (f"# events processed = {numEvt} @ {self.Tnow:.2f}")
-        print (f"Total number of events processed = {numEvt} @ {self.Tnow:.2f}")
+        # print (f"Total number of events processed = {numEvt} @ {self.Tnow:.2f}")
 
 
     def makeZmq(self, mon=False, sync=False):
+        if self.ZMQ_connected(): return # already connected
         self.simZMQ = SimulationMQ()
         if mon:
             self.simZMQ.connect(sync=sync)
@@ -278,7 +474,6 @@ class EvtMsgQueue(PyDES_PQ):  #(PriorityQueue):
             self.timeResync()
         else:
             self.timeScale = 0
-
 
 
     def saveState(self, fileName):
@@ -308,15 +503,13 @@ def loadState(fileName):
 
 
 class EModel:
-    def __init__(self, emq=None):
+    def __init__(self, env=None):
         self.instantEvtMsg = self.directEvtMsg  # alias for the directEvtMsg function
-        self.set_emq(emq)
+        link_env(self, env)
 
-    def Tnow(self):
-        return self.emq.Tnow
-
-    def set_emq(self, emq):
-        self.emq = emq
+    def Tnow(self): return self.emq.Tnow
+    def env(self): return self.emq.env
+    def table(self): return self.emq.env.table_stat
 
     def makeSceneObj(self, mo_book): # to be called by SimMon
         pass
@@ -354,39 +547,29 @@ class EModel:
         return True
 
     def EM_batch(self, e):
-        print (f"batch saved @ {self.Tnow():.3f}")
-        BatchMean.save_batch_all()
+        # print (f"batch saved @ {self.Tnow():.3f}")
+        self.env.save_batch_all()
         batch_dT = e.param
         self.scheduleAgain(batch_dT, e)
 
     def EM_stop(self, e):
-        self.emq.cancelEvtMsgAll()
+        # self.emq.cancelEvtMsgAll()
+        self.emq.stop_running()
 
 
 class PModel(EModel):
-    p_models = []
-
-    @classmethod
-    def register(cls, model):
-        cls.p_models.append(model)
-
-    @classmethod
-    def init_process_all(cls):
-        for m in cls.p_models:
-            if m.need_to_start_proc:
-                m.init_process()
-
-
-    def __init__(self, emq=None):
-        super().__init__(emq)
-        PModel.register(self)
+    def __init__(self, env=None):
+        super().__init__(env)
+        self.env.register_pmodel(self)
         self.need_to_start_proc = True
-        self.activity_cycle = self.process_cycle  # alias for process_cycle function
+        self.process_instance = None
         self.waiting_for = None
         self.timeout_evt = False
-        self.resume_next = self.resume_process # alias
         self.EM_next = self.EM_resume
-        self.schedule_next = self.schedule_resume
+        self.activity_cycle = self.process_cycle  # alias for process_cycle function
+        self.resume_next = self.resume_process # alias
+        self.schedule_next = self.schedule_resume  # alias
+        self.start_process = self.init_process # alias
 
     # for pickling purpose, generator instances should be removed
     def __getstate__(self):
@@ -416,17 +599,27 @@ class PModel(EModel):
             return
         # create process generator
         if proc_func is None:
-            process_instance = self.process_cycle()
+            self.process_instance = self.process_cycle()
         else:
-            process_instance = proc_func()
+            self.process_instance = proc_func()
         # register process to self
         if proc_name is None:
             proc_name = "_proc_instance_"
-        self.__dict__[proc_name] = process_instance
+        self.__dict__[proc_name] = self.process_instance
         # start process
         self.need_to_start_proc = False
-        next(process_instance)
+        next(self.process_instance)
 
+
+    def stop_process(self):
+        if self.process_instance is None:
+            print (f"No process instance to stop")
+            return
+        self.emq.cancelEvtMsg(to=self, msg="EM_resume", param=None) # cancel timeout event
+        self.emq.cancelEvtMsg(to=self, msg="EM_timeout", param=None) # cancel timeout event
+        self.waiting_for = None
+        self.process_instance = None
+        
 
     def schedule_resume(self, dt, proc_instance=None, param=None, msg="EM_resume"):
         self.wait_event(msg)
@@ -483,12 +676,12 @@ class PModel(EModel):
 
 # a queue waiting for resource
 class ResourceQueue(list):
-    def __init__(self, id=None, log_level=0, emq=None):
+    def __init__(self, id=None, log_level=0, env=None):
         self.id = id
         self.log_level = log_level  # 0 for no log, 1 for average only, 2 for detailed log
         if log_level > 0:
             self.log = TimeAverage(name=id, v=0, history=log_level>1)
-        self.emq = emq
+        link_env(env)
 
     def Tnow(self):
         return self.emq.Tnow
@@ -524,15 +717,15 @@ class ResourceQueue(list):
 
 
 class Resource:  # resource with capacity
-    def __init__(self, id=None, capa=1, log_level=0, emq=None, RQ=None):
+    def __init__(self, id=None, capa=1, log_level=0, env=None, RQ=None):
         self.id = id
         self.capa = capa  # initially available
         self.in_use = 0
         self.seized_by = []
         self.log_level = log_level # 0 for no log, 1 for average only, 2 for detailed log
-        self.emq = emq  # emq is required if log_lvel > 0
+        link_env(env)
         if RQ is not None:
-            self.queue = RQ(id, log_level, emq)  # queue of entities waiting for this resource
+            self.queue = RQ(id, log_level, env)  # queue of entities waiting for this resource
         if self.log_level > 0:
             self.log = TimeAverage(name=id, v=self.capa, history=log_level>1)
 
@@ -627,8 +820,8 @@ class Resource:  # resource with capacity
 
 
 class Resource1(Resource):  # resource with capacity = 1 (this can be seized only once)
-    def __init__(self, id=None, log_level=0, emq=None, RQ=None):
-        super().__init__(id=id, capa=1, log_level=log_level, emq=emq, RQ=RQ)
+    def __init__(self, id=None, log_level=0, env=None, RQ=None):
+        super().__init__(id=id, capa=1, log_level=log_level, env=env, RQ=RQ)
         self.seized_by = None
 
     def is_seized_by(self, job):
@@ -650,8 +843,8 @@ class Resource1(Resource):  # resource with capacity = 1 (this can be seized onl
 
 
 class ResourceSet(Resource):  # set of individual resources
-    def __init__(self, id, capa=1, log_level=0, emq=None, RT=Resource1, RQ=ResourceQueue):
-        super().__init__(id, capa, log_level, emq, RQ)
+    def __init__(self, id, capa=1, log_level=0, env=None, RT=Resource1, RQ=ResourceQueue):
+        super().__init__(id, capa, log_level, env, RQ)
         self.pool = [RT(id=f"{id}_{i}") for i in range(capa)]
 
     def init_state(self, sv_name="state", s=None):
@@ -676,8 +869,8 @@ class ResourceSet(Resource):  # set of individual resources
 
 
 class JobSource(PModel):
-    def __init__(self, emq, job_class, to_model, iat_gen, msg="EM_job_arrival"):
-        super().__init__(emq)
+    def __init__(self, env, job_class, to_model, iat_gen, msg="EM_job_arrival"):
+        super().__init__(env)
         self.job_class = job_class
         self.to_model = to_model
         self.msg = msg
@@ -719,6 +912,7 @@ MyPQ = PyDES_PQ
 AModel = EModel     # old name for EModel
 ACModel = PModel    # old name for PModel
 
+    
 
 
 # # pickle serialization test for circular reference

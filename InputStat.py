@@ -957,7 +957,6 @@ class AdvSampler:
 
 
 
-
 class BayesModel:
     def log_likelihood(self, beta):
         pass  # to be redefined
@@ -1062,7 +1061,6 @@ class BayesLogReg(BayesModel):
         self.dim = X.shape[1]
         self.tau = tau_prior
         self.prior_prec = np.linalg.inv(self.prior_cov)
-
 
 
     def logit(self, beta):
@@ -1234,6 +1232,12 @@ def test_adv_sampling():
     print (f"time for {len(samples)} samples = {et-st:.3f}")
 
 
+def test_dist(dist_name, *param):
+    rng = make_dist_generator(None, dist_name, *param)
+    X = rng.get(size=10000)
+    print (f"{dist_name}(param={param}), mean={X.mean()}, std={X.std()}")
+
+
 def test_Gibbs():
     RndNumGen.set_master_seed(42)
     rng = RndNumGen().stream
@@ -1255,6 +1259,9 @@ def test_Gibbs():
 
 
 if __name__ == "__main__":
+    test_dist("gamma", 10, 2)
+    exit(0)
+
     # test_adv_sampling()
     test_Gibbs()
     exit(0)
