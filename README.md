@@ -56,7 +56,7 @@ PyDES is a discrete event simulation engine (or framework).
   - Email: hyshin@kaist.ac.kr
 
 - Version history
-  - V0.3 (2026. 9. 1)
+  - V0.5 (2026. 10. 8)
 
 ## Install
 
