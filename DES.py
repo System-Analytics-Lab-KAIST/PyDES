@@ -17,6 +17,9 @@ import multiprocessing as mp
 # import torch.multiprocessing as mp
 # from concurrent.futures import ProcessPoolExecutor
 
+from jax_backend import resolve, run_parallel  # JAX backend import, (not JAX directly
+
+
 # single federation version for simplicity
 class Environment:
     current_env = None
@@ -124,7 +127,10 @@ class Environment:
         # self.set_seed(pid)
         return self.run_simulation()
 
-    def run_simulation_parallel(self, n_instance, pool=None):
+    def run_simulation_parallel(self, n_instance, pool=None, backend=None):
+        if resolve(backend) == "jax":
+            return run_parallel(self, n_instance)
+
         n_proc = min(n_instance, os.cpu_count())
         if pool is None:
             with mp.Pool(processes=n_proc) as p:
