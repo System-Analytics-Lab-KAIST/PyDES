@@ -4,6 +4,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from .engine import mul
+
 INF = jnp.inf
 
 
@@ -30,7 +32,7 @@ def state_change(ta: TimeAvg, t, v) -> TimeAvg:
     dt = t - ta.prevT
 
     return TimeAvg(ta.initT, jnp.asarray(t, jnp.float64), v,
-                   ta.sum + ta.prevV * dt, ta.XX + ta.prevV * ta.prevV * dt,
+                   ta.sum + mul(ta.prevV, dt), ta.XX + mul(ta.prevV * ta.prevV, dt),
                    jnp.where(later & (v < ta.min), v, ta.min), jnp.where(later & (v > ta.max), v, ta.max))
 
 
@@ -64,7 +66,7 @@ def acc() -> Acc:
 def acc_add(a: Acc, x) -> Acc:
     """Accumulator.append."""
     x = jnp.asarray(x, jnp.float64)
-    return Acc(a.n + 1, a.X + x, a.XX + x * x, jnp.where(x < a.min, x, a.min), jnp.where(x > a.max, x, a.max))
+    return Acc(a.n + 1, a.X + x, a.XX + mul(x, x), jnp.where(x < a.min, x, a.min), jnp.where(x > a.max, x, a.max))
 
 
 def acc_avg(a: Acc) -> jax.Array:

@@ -1,9 +1,13 @@
 """JAX backend Event Loop: EvtMsgQueue.runSimulation compiled.
 
 We represent a model here as a set of handlers, one per event kind, each a function
-(sim, state, arg) -> (sim, state). The engine pops the next event, advances the clock
-and dispatches with lax.switch, until a handler calls stop(), the heap runs empty,
-or an error flag is set. run_batch runs many replications in lockstep (with vmap).
+(sim, state, arg, do) -> (sim, state). The engine pops the next event, advances the clock
+and calls every handler with do = "this event is yours", until a handler calls stop(),
+the heap runs empty, or an error flag is set. run_batch runs many replications in lockstep (with vmap).
+
+Note, handlers change state only where do is True and only the few cells they touch
+(set_at, select, schedule(..., do)). No lax.switch or lax.cond over the whole state:
+under vmap those run every branch and copy the full state on every event.
 """
 from dataclasses import dataclass
 from functools import partial
@@ -39,7 +43,7 @@ class Sim(NamedTuple):
     n_events: jax.Array  # int32[], events processed, canceled ones included
 
 
-Handler = Callable[[Sim, Any, jax.Array], tuple[Sim, Any]]
+Handler = Callable[[Sim, Any, jax.Array, jax.Array], tuple[Sim, Any]]
 
 
 @dataclass(frozen=True, eq=False)
@@ -58,38 +62,54 @@ def flag(sim: Sim, cond, bit: int) -> Sim:
     return sim._replace(err=sim.err | jnp.where(cond, bit, 0).astype(jnp.int32))
 
 
-def schedule(sim: Sim, dt, kind, arg=0) -> Sim:
-    """EvtMsgQueue.scheduleEvtMsg4: event at Tnow + dt."""
-    h, full = hp.push(sim.heap, sim.tnow + dt, kind, arg)
+def mul(a, b):
+    """a * b rounded on its own, as Python does. Note, under jit XLA otherwise fuses a product
+    and a following add into one FMA (single rounding), which changes the last bits."""
+    return lax.optimization_barrier(jnp.multiply(a, b))
+
+
+def select(do, new, old):
+    """new where do, else old, for any pytree. Keep it for small state."""
+    return jax.tree.map(lambda a, b: jnp.where(do, a, b), new, old)
+
+
+def set_at(arr, i, v, do=True):
+    """arr.at[i].set(v) where do, a one-cell write also under vmap."""
+    return arr.at[i].set(jnp.where(do, v, arr[i]))
+
+
+def schedule(sim: Sim, dt, kind, arg=0, do=True) -> Sim:
+    """EvtMsgQueue.scheduleEvtMsg4 if do: event at Tnow + dt."""
+    h, full = hp.push(sim.heap, sim.tnow + lax.optimization_barrier(dt), kind, arg, do)  # no FMA with dt
     return flag(sim._replace(heap=h), full, ERR_HEAP_FULL)
 
 
-def cancel(sim: Sim, kind, arg=0, arg_mask=True) -> tuple[Sim, jax.Array]:
-    """EvtMsgQueue.cancelEvtMsg."""
-    h, found = hp.cancel_first(sim.heap, kind, arg, arg_mask)
+def cancel(sim: Sim, kind, arg=0, arg_mask=True, do=True) -> tuple[Sim, jax.Array]:
+    """EvtMsgQueue.cancelEvtMsg if do."""
+    h, found = hp.cancel_first(sim.heap, kind, arg, arg_mask, do)
     return sim._replace(heap=h), found
 
 
-def stop(sim: Sim) -> Sim:
-    """EvtMsgQueue.stop_running."""
-    return sim._replace(running=jnp.bool_(False))
+def stop(sim: Sim, do=True) -> Sim:
+    """EvtMsgQueue.stop_running if do."""
+    return sim._replace(running=sim.running & ~do)
 
 
 def _active(sim: Sim, max_events: int):
     return sim.running & (sim.heap.size > 0) & (sim.err == 0) & (sim.n_events < max_events)
 
 
-def _step(model: Model, sim: Sim, state):
-    """EvtMsgQueue.runNextEvent: drop canceled event without advancing the clock."""
-    h, ev = hp.pop(sim.heap)
-    sim = sim._replace(heap=h, n_events=sim.n_events + 1)
+def _step(model: Model, sim: Sim, state, active):
+    """EvtMsgQueue.runNextEvent if active: drop canceled event without advancing the clock."""
+    h, ev = hp.pop(sim.heap, active)
+    fire = active & ev.live
+    sim = sim._replace(heap=h, n_events=sim.n_events + active)
+    sim = flag(sim, fire & (ev.time < sim.tnow), ERR_PAST)
+    sim = sim._replace(tnow=jnp.where(fire, ev.time, sim.tnow))
+    for kind, handler in enumerate(model.handlers):
+        sim, state = handler(sim, state, ev.arg, fire & (ev.kind == kind))
 
-    def fire(c):
-        sim, state = c
-        sim = flag(sim, ev.time < sim.tnow, ERR_PAST)
-        return lax.switch(ev.kind, model.handlers, sim._replace(tnow=ev.time), state, ev.arg)
-
-    return lax.cond(ev.live, fire, lambda c: c, (sim, state))
+    return sim, state
 
 
 def _finish(sim: Sim, max_events: int) -> Sim:
@@ -101,14 +121,14 @@ def _finish(sim: Sim, max_events: int) -> Sim:
 def run(model: Model, sim: Sim, state, max_events: int):
     """One replication until stop, empty heap or error."""
     sim, state = lax.while_loop(lambda c: _active(c[0], max_events),
-                                lambda c: _step(model, *c), (sim, state))
+                                lambda c: _step(model, *c, jnp.bool_(True)), (sim, state))
     return _finish(sim, max_events), state
 
 
 @partial(jax.jit, static_argnames=("model", "max_events"))
 def run_batch(model: Model, sim: Sim, state, max_events: int):
     def step(sim, state):
-        return lax.cond(_active(sim, max_events), lambda c: _step(model, *c), lambda c: c, (sim, state))
+        return _step(model, sim, state, _active(sim, max_events))
 
     sim, state = lax.while_loop(lambda c: jnp.any(jax.vmap(_active, (0, None))(c[0], max_events)),
                                 lambda c: jax.vmap(step)(*c), (sim, state))
@@ -119,5 +139,5 @@ def check(model: Model, err) -> None:
     """Raise with appropriate msg if any replication flags error."""
     err = int(jnp.bitwise_or.reduce(jnp.atleast_1d(err)))
     if err:
-        texts = dict(_ERR_TEXT, **dict(model.errors))
+        texts = {**_ERR_TEXT, **dict(model.errors)}
         raise RuntimeError(f"{model.name}: " + "; ".join(t for b, t in texts.items() if err & b))

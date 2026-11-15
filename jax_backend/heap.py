@@ -75,29 +75,33 @@ def _siftup(h: Heap, pos) -> Heap:
     return _siftdown(_put(h, pos, new), startpos, pos)
 
 
-def push(h: Heap, time, kind, arg) -> tuple[Heap, jax.Array]:
-    """heapq.heappush. Returns the heap and an overflow flag. A full heap is left unchanged."""
-    full = h.size >= h.time.shape[0]
+def push(h: Heap, time, kind, arg, do=True) -> tuple[Heap, jax.Array]:
+    """heapq.heappush if do. Returns the heap and an overflow flag. A full heap is left unchanged."""
+    full = do & (h.size >= h.time.shape[0])
     arg = jnp.broadcast_to(jnp.asarray(arg, jnp.int32), h.arg.shape[1:])
     it = Item(jnp.asarray(time, jnp.float64), jnp.asarray(kind, jnp.int32), arg, jnp.bool_(True))
 
-    def do(h):
+    def put(h):
         h = _put(h, h.size, it)._replace(size=h.size + 1)
         return _siftdown(h, 0, h.size - 1)
 
-    return lax.cond(full, lambda h: h, do, h), full
+    return lax.cond(do & ~full, put, lambda h: h, h), full
 
 
-def pop(h: Heap) -> tuple[Heap, Item]:
-    """heapq.heappop. The heap must not be empty."""
-    last = _get(h, h.size - 1)
-    h = h._replace(size=h.size - 1)
+def pop(h: Heap, do=True) -> tuple[Heap, Item]:
+    """heapq.heappop if do. The heap must not be empty then."""
+    last = _get(h, jnp.maximum(h.size - 1, 0))
 
-    def nonempty(h):
-        top = _get(h, 0)
-        return _siftup(_put(h, 0, last), 0), top
+    def take(h):
+        h = h._replace(size=h.size - 1)
 
-    return lax.cond(h.size > 0, nonempty, lambda h: (h, last), h)
+        def nonempty(h):
+            top = _get(h, 0)
+            return _siftup(_put(h, 0, last), 0), top
+
+        return lax.cond(h.size > 0, nonempty, lambda h: (h, last), h)
+
+    return lax.cond(do & (h.size > 0), take, lambda h: (h, last), h)
 
 
 def _match(h: Heap, kind, arg, arg_mask):
@@ -106,11 +110,11 @@ def _match(h: Heap, kind, arg, arg_mask):
     return in_use & h.live & (h.kind == kind) & same_arg
 
 
-def cancel_first(h: Heap, kind, arg, arg_mask) -> tuple[Heap, jax.Array]:
-    """EvtMsgQueue.cancelEvtMsg: the first live match in list order. arg_mask False = any value."""
+def cancel_first(h: Heap, kind, arg, arg_mask, do=True) -> tuple[Heap, jax.Array]:
+    """EvtMsgQueue.cancelEvtMsg if do: the first live match in list order. arg_mask False = any value."""
     m = _match(h, kind, arg, arg_mask)
     i = jnp.argmax(m)
-    found = m[i]
+    found = m[i] & do
     return h._replace(live=h.live.at[i].set(h.live[i] & ~found)), found
 
 
