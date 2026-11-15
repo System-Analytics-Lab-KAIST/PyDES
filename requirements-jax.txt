@@ -1,0 +1,4 @@
+# Optional for requirements for JAX backend (jax_backend)
+jax[cuda12]>=0.4.36 # Assumes NVIDIA GPU with CUDA 12
+# CPU only (if no NVIDIA GPU comment above and uncomment/use below instead).
+# jax[cpu]>=0.4.36
