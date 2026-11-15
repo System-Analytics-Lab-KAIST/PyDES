@@ -1,7 +1,7 @@
 # jax_backend - optional JAX backend for PyDES
 
-Adds a second optional backend that runs same model as one compiled JAX program and many replications at once.
-Results equal the base backend value for value.
+Adds a second optional backend that runs same model as a compiled JAX program and many replications at once.
+Results equal the base backend exactly (bit-wise). 
 
 ## Installation
 
@@ -23,15 +23,22 @@ Without an NVIDIA GPU, switch the two lines in `requirements-jax.txt` to the com
 Same call as before, with one optional parameter:
 
 ```python
-env.run_simulation_parallel(64)                  # base PyDES (default)
-env.run_simulation_parallel(64, backend="jax")   # JAX
+Environment.run_multiple(run_mcmsq, [(seed,) for seed in range(64)])                  # base PyDES (default)
+Environment.run_multiple(run_mcmsq, [(seed,) for seed in range(64)], backend="jax")   # JAX
+
+env.run_simulation_parallel(64, backend="jax")   # same switch, for event-only models
 ```
 
 Alternatively, can fix for a whole run with `PYDES_BACKEND=jax`. An explicit `backend=` wins.
 Replication `r` of the JAX backend equals replication `r` of the base backend.
 
-A model supports `backend="jax"` once its main model class names its JAX port, e.g. `jax_port = "mcmsq_jax:run_parallel"`.
-The port is a function `(env, n_instance) -> list of results`, same as the base `run_simulation_parallel`.
+A model supports `backend="jax"` once it names its JAX port with a `jax_port = "module:function"` attribute:
+- on the work function for `run_multiple`, e.g. `run_mcmsq.jax_port = "examples.mcmsq.mcmsq_jax:run_multiple"`, port `(param_list) -> list of results`
+- on the main model class for `run_simulation_parallel`, port `(env, n_instance) -> list of results`
+
+Note, process models (`PModel` with `yield`) need `run_multiple`: the base `run_simulation_parallel` cannot pickle their generators.
+
+Example: `examples/mcmsq/` is the multi-class, multi-server queue of lecture IE532 L3 with its JAX port.
 
 ## Why JAX is faster, and when it is not
 

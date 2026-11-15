@@ -180,3 +180,6 @@ Stat.xlsx
 simlog/
 output/
 results/
+
+# Confirm with Professor if should include examples in this repo
+examples/

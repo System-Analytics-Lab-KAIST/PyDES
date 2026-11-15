@@ -1,10 +1,14 @@
 """Optional JAX backend for PyDES.
 
-Dont import/use this folder directly, call env.run_simulation_parallel(n, backend="jax").
+Dont import/use this folder directly, call one of
+    env.run_simulation_parallel(n, backend="jax")
+    Environment.run_multiple(work_fn, param_list, backend="jax")
 
-A model opts in with a class attribute on its main model,
-    jax_port = "module:function",
-naming a function (env, n_instance) -> list of results, same as the base run_simulation_parallel.
+A model opts in with a jax_port = "module:function" attribute,
+    on its main model class for run_simulation_parallel: function (env, n_instance) -> list of results,
+    on its work function for run_multiple: function (param_list) -> list of results,
+same results as the base call. Note, run_multiple is the one for process models (PModel with yield),
+since the base run_simulation_parallel cannot pickle their generators.
 
 Note, this file never imports JAX. The JAX modules load only once backend="jax" is actually used.
 """
@@ -35,10 +39,19 @@ def run_parallel(env, n_instance: int) -> list:
     if model is None:
         raise ValueError("no main model, call env.initial_events(main_model) first")
 
-    target = getattr(type(model), "jax_port", None)
+    return _port(type(model), type(model).__name__)(env, n_instance)
+
+
+def run_multiple_jax(work_fn, param_list) -> list:
+    """Environment.run_multiple on the JAX port of work_fn."""
+    return _port(work_fn, work_fn.__name__)(param_list)
+
+
+def _port(owner, name: str):
+    target = getattr(owner, "jax_port", None)
     if target is None:
-        raise NotImplementedError(f"{type(model).__name__} has no jax_port, use backend=\"pydes\"")
+        raise NotImplementedError(f"{name} has no jax_port, use backend=\"pydes\"")
 
     module, func = target.split(":")
 
-    return getattr(importlib.import_module(module), func)(env, n_instance)
+    return getattr(importlib.import_module(module), func)

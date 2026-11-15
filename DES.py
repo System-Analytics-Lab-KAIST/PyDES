@@ -17,7 +17,7 @@ import multiprocessing as mp
 # import torch.multiprocessing as mp
 # from concurrent.futures import ProcessPoolExecutor
 
-from jax_backend import resolve, run_parallel  # JAX backend import, (not JAX directly
+from jax_backend import resolve, run_parallel, run_multiple_jax  # JAX backend import, (not JAX directly
 
 
 # single federation version for simplicity
@@ -140,7 +140,10 @@ class Environment:
 
 
     @staticmethod
-    def run_multiple(work_fn, param_list, parallel=True):
+    def run_multiple(work_fn, param_list, parallel=True, backend=None):
+        if resolve(backend) == "jax":
+            return run_multiple_jax(work_fn, param_list)
+
         if parallel:
             n_proc = min(len(param_list), os.cpu_count())
             # Pool is an old style multi-processing
