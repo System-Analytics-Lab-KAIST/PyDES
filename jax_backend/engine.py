@@ -27,6 +27,9 @@ ERR_STREAM = 4
 ERR_MAX_EVENTS = 8
 ERR_MODEL = 256  # first bit free for model-defined errors
 
+SMALL = 4096  # arrays up to this size are written by a masked select, which XLA fuses; larger by a scatter
+EVENTS_PER_ROUND = 16  # events per replication between two checks of "any replication still running" (a GPU-host sync)
+
 _ERR_TEXT = {
         ERR_HEAP_FULL: "event heap full, raise heap_cap",
         ERR_PAST: "event scheduled in the past",
@@ -74,8 +77,11 @@ def select(do, new, old):
 
 
 def set_at(arr, i, v, do=True):
-    """arr.at[i].set(v) where do, a one-cell write also under vmap."""
-    return arr.at[i].set(jnp.where(do, v, arr[i]))
+    """arr.at[i].set(v) where do, a one-cell write also under vmap. i indexes the first axis."""
+    if arr.size > SMALL:
+        return arr.at[i].set(jnp.where(do, v, arr[i]))
+    m = ((jnp.arange(arr.shape[0]) == i) & do).reshape((-1,) + (1,) * (arr.ndim - 1))
+    return jnp.where(m, jnp.asarray(v, arr.dtype), arr)
 
 
 def schedule(sim: Sim, dt, kind, arg=0, do=True) -> Sim:
@@ -127,11 +133,15 @@ def run(model: Model, sim: Sim, state, max_events: int):
 
 @partial(jax.jit, static_argnames=("model", "max_events"))
 def run_batch(model: Model, sim: Sim, state, max_events: int):
+    """Many replications in lockstep. A step of a replication that is done changes nothing."""
     def step(sim, state):
         return _step(model, sim, state, _active(sim, max_events))
 
-    sim, state = lax.while_loop(lambda c: jnp.any(jax.vmap(_active, (0, None))(c[0], max_events)),
-                                lambda c: jax.vmap(step)(*c), (sim, state))
+    def round_(c):
+        return lax.fori_loop(0, EVENTS_PER_ROUND, lambda _, c: jax.vmap(step)(*c), c)
+
+    sim, state = lax.while_loop(lambda c: jnp.any(jax.vmap(_active, (0, None))(c[0], max_events)), round_,
+                                (sim, state))
     return jax.vmap(_finish, (0, None))(sim, max_events), state
 
 
